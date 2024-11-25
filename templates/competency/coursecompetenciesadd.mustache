@@ -40,11 +40,10 @@
         ],
     }
 }}
-<div class="local_displace competency coursecompetenciesadd {{#initially_hidden}}hidden{{/initially_hidden}}">
-    <input type="hidden" name="session_competencies" value="{{session_competencies}}"/>
-    <div style="display: flex; justify-content: space-between;" class="mb-2">
+<div id="competencies-selector-{{uniqid}}" class="local_displace competency coursecompetenciesadd {{#initially_hidden}}hidden{{/initially_hidden}}">
+    <div style="display: flex; justify-content: space-between;" class="mb-4">
         <div>
-            <select name="frameworkid">
+            <select class="form-control" name="frameworkid">
                 {{#frameworks}}
                 <option value="{{id}}"{{#selected}} selected="selected"{{/selected}}>
                     {{shortname}}
@@ -57,16 +56,19 @@
               <label for="searchinput-{{uniqid}}">
                 <span class="sr-only">{{#str}} search, core {{/str}}</span>
               </label>
-              <input type="text"
-                     class="form-control"
-                     placeholder="{{#str}} search, core {{/str}}"
-                     aria-label="{{#str}} search, core {{/str}}"
-                     name="competency-search"
-                     data-region="input"
-                     autocomplete="off"
-              >
+              <div class="clear-button-wrapper">
+                  <input type="text"
+                         class="form-control"
+                         placeholder="{{#str}} search, core {{/str}}"
+                         aria-label="{{#str}} search, core {{/str}}"
+                         name="competency-search"
+                         data-region="input"
+                         autocomplete="off"
+                  >
+                  <span class="clear-button">&times;</span>
+              </div>
               <div class="input-group-append" style="flex-shrink: 0"> {{! ohne flex-shrink wird das Suchformular nicht richtig angezeigt?!? }}
-                <button type="submit" class="btn btn-primary search-icon">
+                <button type="button" class="btn btn-primary search-icon">
                   {{#pix}} a/search, core {{/pix}}
                   <span class="sr-only">{{#str}} search, core {{/str}}</span>
                 </button>
@@ -75,17 +77,25 @@
         </div>
     </div>
 
-    <div id="local_displace-framework-container">
+    <div class="local_displace-framework-container">
         <div>
-            Lade Daten...
+            {{#str}} competency:loading_framework, local_displace {{/str}}
         </div>
     </div>
 
-    <div id="local_displace-table-search-not-entries-found-message" class="hidden">
+    <div class="local_displace-table-search-not-entries-found-message hidden" style="padding: 25px 10px 5px 10px; font-weight: bold">
         <p>Keine Einträge gefunden</p>
+    </div>
+    <div class="local_displace-table-search-more-entries-found hidden" style="padding: 25px 10px 5px 10px; font-weight: bold">
+        <p>Zu Ihrem Ergebnis wurden zu viele Einträge gefunden, es werden nur die ersten <span class="num"></span> Einträge angezeigt.</p>
     </div>
 </div>
 
 {{#js}}
-require(['local_displace/competency'], function(C) { C.competenciesaddInit('{{uniqid}}')});
+require(['local_displace/competency'], function(C) {
+    C.competenciesSelectorInit({
+        id: 'competencies-selector-{{uniqid}}',
+        session_competencies_input: '{{session_competencies_input}}',
+    });
+});
 {{/js}}
