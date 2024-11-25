@@ -36,8 +36,6 @@ if ($courseid) {
     \core_competency\api::require_enabled();
     require_capability('moodle/competency:coursecompetencymanage', $coursecontext);
 
-    \core_competency\api::require_enabled();
-
     $PAGE->set_context($coursecontext);
     $PAGE->set_title($course->fullname);
     $PAGE->set_heading($course->fullname);
@@ -50,8 +48,9 @@ if ($courseid) {
 }
 
 if (optional_param('action', '', PARAM_TEXT) == 'competency_selector_tree') {
-    echo \local_displace\competencylib::render_competency_selector_tree($courseid, $frameworkid);
-
+    echo $OUTPUT->render_from_template('local_displace/competency/coursecompetenciesadd_tree', [
+        'competencies_output' => \local_displace\competencylib::render_competency_selector_tree($courseid, $frameworkid),
+    ]);
     exit;
 }
 

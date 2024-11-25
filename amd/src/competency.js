@@ -6,200 +6,536 @@ import Pending from 'core/pending';
 import * as Str from 'core/str';
 import Config from 'core/config';
 
-var debug = false;
-var queue = [];
-var queueActiveItem = false;
+const debug = false;
 
-const courseid = Config.courseId > 1 ? Config.courseId : 0;
-const useSessionCompetencies = !courseid;
-let sessionCompetencies = [];
-
-const sessionCompetenciesTmp = $(':input[name="session_competencies"]').val();
-if (sessionCompetenciesTmp) {
-  sessionCompetencies = sessionCompetenciesTmp.split(',');
+/**
+ * Escape HTML special characters.
+ * @param {string} str
+ * @returns {string}
+ */
+function escapeHTML(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 /**
- * Add a single competency to a course.
- * @param {DOMElement} a sender of the event.
+ * Escape regular expression special characters.
+ * @param {string} str
+ * @returns {string}
  */
-function competencyAddSingle(a) {
-  if (debug) {
-    console.log('Add single', a);
-  }
-
-  let id = $(a).closest('tr').attr('data-id');
-
-  if (useSessionCompetencies) {
-    sessionCompetencies.push(id);
-    $(a).closest('tr').addClass('used');
-    $(':input[name="session_competencies"]').val(sessionCompetencies.join(','));
-    return;
-  }
-
-  let method = 'core_competency_add_competency_to_course';
-  let data = {'courseid': courseid, 'competencyid': id};
-  queue.push({'methodname': method, 'args': data, 'tr': $(a).closest('tr')});
-  $(a).closest('tr').addClass('queue-pending');
-  competencyQueue();
-};
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 /**
- * Add/Remove multiple competencies
- * to/from a course.
- * @param {DOMElement} a sender of the event.
+ * Get strings from the server.
+ * @param {array} requests requested strings
+ * @returns {Promise<*>}
  */
-function competencyAddMultiple(a) {
-  // Get the first child to decide if we
-  // add or remove.
-  let tr = $(a).closest('tr');
-  let id = tr.attr('data-id');
+async function get_strings(requests) {
+  return Str.get_strings(requests).then(strings => {
+    var result = {};
+    requests.forEach((str, i) => {
+      result[i] = strings[i]; // backwards compatible
+      result[str.key] = strings[i];
+    });
+    return result;
+  });
+}
 
-  let children = getChildren(tr);
+const getOnceCache = {};
 
-  if (children.length > 0) {
-    // falls einer noch nicht ausgewählt ist, alle auswählen, sonst alle abwählen
-    var selectAll = children.filter(':not(.used)').length > 0;
+async function getOnce(url) {
+  const cache = getOnceCache;
 
-    toggleNode(tr, true, true);
+  // Check if there's an ongoing request or a cached result for the URL
+  if (cache[url]) {
+    return cache[url];
+  }
 
-    if (selectAll) {
-      children.not('.used').each(function () {
-        competencyAddSingle($(this).find('.addsingle'));
-      });
+  // Start a new request and store the promise in the cache
+  cache[url] = $.get(url)
+    .then(html => {
+      cache[url] = Promise.resolve(html); // Update cache with the final result
+      return html;
+    })
+    .catch(error => {
+      delete cache[url]; // Remove from cache if the request fails
+      throw error;
+    });
+
+  // Return the ongoing or completed request
+  return cache[url];
+}
+
+/**
+ * Initially collapse all competency frameworks.
+ * @param {object} config
+ */
+export function competenciesSelectorInit(config) {
+  if (debug) {
+    console.log('competenciesSelectorInit');
+  }
+
+  const queue = [];
+  let queueActiveItem = false;
+
+  const useSessionCompetencies = !!config.session_competencies_input;
+  const courseid = Config.courseId > 1 && !useSessionCompetencies ? Config.courseId : 0;
+  const $sessionCompetenciesInput = config.session_competencies_input ? $('input[name="' + config.session_competencies_input + '"]') : $();
+  let sessionCompetencies = [];
+
+  const sessionCompetenciesTmp = $sessionCompetenciesInput.val();
+  if (sessionCompetenciesTmp) {
+    sessionCompetencies = $sessionCompetenciesInput.val().split(',');
+  }
+
+  const $competenciesSelectorContainer = $('#' + config.id);
+  const $frameworkSelect = $competenciesSelectorContainer.find('select[name="frameworkid"]');
+  const $searchInput = $competenciesSelectorContainer.find('.simplesearchform :input[type="text"]');
+
+  $frameworkSelect.change(function () {
+    // clear old search
+    if ($searchInput.val()) {
+      $searchInput.val('').trigger('input');
+      updateSearch();
+    }
+
+    loadSelectedFramework();
+  });
+
+  $(function () {
+    // only load tree if container is visible
+    if ($competenciesSelectorContainer.is(':visible')) {
+      loadSelectedFramework();
     } else {
-      function removeNow() {
-        children.filter('.used').each(function () {
-          competencyRemoveSingle($(this).find('.removesingle'), true);
-        });
-      }
+      var interval = setInterval(function () {
+        if ($competenciesSelectorContainer.is(':visible')) {
+          clearInterval(interval);
+          loadSelectedFramework();
+        }
+      }, 300);
+    }
+  });
 
-      if (useSessionCompetencies) {
-        removeNow();
+  $competenciesSelectorContainer
+    .on('click', '.has-children .toggler', function (e) {
+      e.preventDefault();
+      toggleNode(this, null);
+    })
+    // handle other events
+    .on('click', '.addsingle', function (e) {
+      e.preventDefault();
+      competencyAddSingle(this);
+    })
+    .on('click', '.addmultiple', function (e) {
+      e.preventDefault();
+      competencyAddMultiple(this);
+    })
+    .on('click', '.removesingle', function (e) {
+      e.preventDefault();
+      competencyRemoveSingle(this);
+    });
+
+  $competenciesSelectorContainer.on('click', '.simplesearchform .clear-button', function () {
+    $(this).closest('.clear-button-wrapper').find(':input[type="text"]').val('').trigger('input').focus();
+    updateSearch();
+  });
+
+  $competenciesSelectorContainer.on('click', '.' +
+    'simplesearchform button', function () {
+    updateSearch();
+  });
+
+  $searchInput
+    .on('keypress', function (e) {
+      if (e.which === 13) {  // 13 is the Enter key code
+        // Action to perform when Enter is pressed
+        e.preventDefault();
+        updateSearch();
+      }
+    })
+    .on('input', function () {
+      const searchText = this.value.trim();
+      $(this).closest('.clear-button-wrapper').find('.clear-button').toggle(searchText.length > 0);
+    });
+
+  /**
+   * Add a single competency to a course.
+   * @param {HTMLElement} a sender of the event.
+   */
+  function competencyAddSingle(a) {
+    if (debug) {
+      console.log('Add single', a);
+    }
+
+    let id = $(a).closest('.competency-row').attr('data-id');
+
+    if (useSessionCompetencies) {
+      sessionCompetencies.push(id);
+      $(a).closest('.competency-row').addClass('used');
+      $sessionCompetenciesInput.val(sessionCompetencies.join(','));
+      return;
+    }
+
+    let method = 'core_competency_add_competency_to_course';
+    let data = {'courseid': courseid, 'competencyid': id};
+    queue.push({'methodname': method, 'args': data, row: $(a).closest('.competency-row')});
+    $(a).closest('.competency-row').addClass('queue-pending');
+    competencyQueue();
+  }
+
+  /**
+   * Add/Remove multiple competencies
+   * to/from a course.
+   * @param {HTMLElement} a sender of the event.
+   */
+  async function competencyAddMultiple(a) {
+    // Get the first child to decide if we
+    // add or remove.
+    let row = $(a).closest('.competency-row');
+    let children = getChildren(row)
+      // nur sichtbare hinzufügen, weil aufgrund der suche ggf welche versteckt sind
+      .filter(function () {
+        return $(this).closest('.hidden').length === 0;
+      });
+
+    /**
+     * mark children as removed
+     */
+    function removeNow() {
+      children.filter('.used').each(function () {
+        competencyRemoveSingle($(this).find('.removesingle'), true);
+      });
+    }
+
+    if (children.length > 0) {
+      // falls einer noch nicht ausgewählt ist, alle auswählen, sonst alle abwählen
+      var selectAll = children.filter(':not(.used)').length > 0;
+
+      toggleNode(row, true);
+
+      if (selectAll) {
+        children.not('.used').each(function () {
+          competencyAddSingle($(this).find('.addsingle'));
+        });
       } else {
-        let shortname = $(a).closest('tr').find('.shortname').html();
-        Str.get_strings([
-          {'key': 'competency:remove:title', component: 'local_displace'},
-          {'key': 'competency:remove:multiple', component: 'local_displace', param: {'shortname': shortname}},
-          {'key': 'yes'},
-          {'key': 'no'}
-        ]).done(function (s) {
+        if (useSessionCompetencies) {
+          removeNow();
+        } else {
+          let shortname = $(a).closest('.competency-row').find('.shortname').html();
+          const s = await get_strings([
+            {'key': 'competency:remove:title', component: 'local_displace'},
+            {'key': 'competency:remove:multiple', component: 'local_displace', param: {shortname}},
+            {'key': 'yes'},
+            {'key': 'no'}
+          ]);
+
           Notification.confirm(
             s[0], s[1], s[2], s[3],
             removeNow
           );
-        }).fail(Notification.exception);
-      }
-    }
-
-    if (useSessionCompetencies) {
-      $(':input[name="session_competencies"]').val(sessionCompetencies.join(','));
-    }
-  }
-}
-
-/**
- * Remove a single competency from a course.
- * @param {DOMElement} a sender of the event.
- * @param {bool} confirmed if the user confirmed the action.
- */
-function competencyRemoveSingle(a, confirmed) {
-  if (useSessionCompetencies) {
-    let id = $(a).closest('tr').attr('data-id');
-
-    sessionCompetencies = sessionCompetencies.filter((value) => value != id);
-    $(a).closest('tr').removeClass('used');
-    $(':input[name="session_competencies"]').val(sessionCompetencies.join(','));
-    return;
-  }
-
-  if (typeof confirmed === 'undefined') {
-    var shortname = $(a).closest('tr').find('.shortname').html();
-    Str.get_strings([
-      {'key': 'competency:remove:title', component: 'local_displace'},
-      {'key': 'competency:remove:single', component: 'local_displace', param: {'shortname': shortname}},
-      {'key': 'yes'},
-      {'key': 'no'}
-    ]).done(function (s) {
-        Notification.confirm(
-          s[0], s[1], s[2], s[3],
-          function () {
-            competencyRemoveSingle(a, true);
-          }
-        );
-      }
-    ).fail(Notification.exception);
-  } else {
-    if (debug) {
-      console.log('Remove single', a);
-    }
-    let id = $(a).closest('tr').attr('data-id');
-    let method = 'core_competency_remove_competency_from_course';
-    let data = {'courseid': courseid, 'competencyid': id};
-    queue.push({'methodname': method, 'args': data, 'tr': $(a).closest('tr')});
-    $(a).closest('tr').addClass('queue-pending');
-    competencyQueue();
-  }
-}
-
-/**
- * Handles the next item in queue.
- */
-function competencyQueue() {
-  if (queueActiveItem) {
-    return;
-  }
-  if (queue.length == 0) {
-    return;
-  }
-  let item = queue.shift();
-  if (debug) {
-    console.log('Queue Item', item);
-  }
-  queueActiveItem = true;
-  Ajax.call([{
-    methodname: item.methodname,
-    args: item.args,
-    done: function (result) {
-      $(item.tr).removeClass('queue-pending');
-      if (debug) {
-        console.log('Results of ' + item.methodname, result);
-      }
-      if (result) {
-        if (item.methodname == 'core_competency_add_competency_to_course') {
-          $(item.tr).addClass('used');
-        } else {
-          $(item.tr).removeClass('used');
         }
-        $(item.tr).addClass('displace-alert success');
-        setTimeout(
-          function () {
-            $(item.tr).removeClass('displace-alert success');
-          }, 1000
-        );
-      } else {
-        $(item.tr).addClass('displace-alert danger');
       }
-      queueActiveItem = false;
-      competencyQueue();
-    },
-    fail: function (ex) {
-      $(item.tr).addClass('displace-alert danger');
-      queueActiveItem = false;
-      Notification.exception(ex);
     }
-  }]);
+  }
+
+  /**
+   * Remove a single competency from a course.
+   * @param {HTMLElement} el sender of the event.
+   * @param {boolean} confirmed if the user confirmed the action.
+   */
+  async function competencyRemoveSingle(el, confirmed = false) {
+    if (useSessionCompetencies) {
+      let id = $(el).closest('.competency-row').attr('data-id');
+
+      sessionCompetencies = sessionCompetencies.filter((value) => value != id);
+      $(el).closest('.competency-row').removeClass('used');
+      $sessionCompetenciesInput.val(sessionCompetencies.join(','));
+      return;
+    }
+
+    if (!confirmed) {
+      var shortname = $(el).closest('.competency-row').find('.shortname').html();
+      const s = await get_strings([
+        {'key': 'competency:remove:title', component: 'local_displace'},
+        {'key': 'competency:remove:single', component: 'local_displace', param: {shortname}},
+        {'key': 'yes'},
+        {'key': 'no'}
+      ]);
+
+      Notification.confirm(
+        s[0], s[1], s[2], s[3],
+        function () {
+          competencyRemoveSingle(el, true);
+        }
+      );
+    } else {
+      if (debug) {
+        console.log('Remove single', el);
+      }
+      let id = $(el).closest('.competency-row').attr('data-id');
+      let method = 'core_competency_remove_competency_from_course';
+      let data = {'courseid': courseid, 'competencyid': id};
+      queue.push({'methodname': method, 'args': data, row: $(el).closest('.competency-row')});
+      $(el).closest('.competency-row').addClass('queue-pending');
+      competencyQueue();
+    }
+  }
+
+  /**
+   * Handles the next item in queue.
+   */
+  function competencyQueue() {
+    if (queueActiveItem) {
+      return;
+    }
+    if (queue.length == 0) {
+      return;
+    }
+    let item = queue.shift();
+    if (debug) {
+      console.log('Queue Item', item);
+    }
+    queueActiveItem = true;
+    Ajax.call([{
+      methodname: item.methodname,
+      args: item.args,
+      done: function (result) {
+        if (document.location.href.match(/coursecompetencies.php/)) {
+          // competencies list, remove the row
+          $(item.row).fadeOut(500, function () {
+            $(this).remove(); // Remove the <tr> from the DOM after fading out
+          });
+        } else {
+          $(item.row).removeClass('queue-pending');
+          if (debug) {
+            console.log('Results of ' + item.methodname, result);
+          }
+          if (result) {
+            if (item.methodname == 'core_competency_add_competency_to_course') {
+              $(item.row).addClass('used');
+            } else {
+              $(item.row).removeClass('used');
+            }
+            $(item.row).addClass('displace-alert success');
+            setTimeout(
+              function () {
+                $(item.row).removeClass('displace-alert success');
+              }, 1000
+            );
+          } else {
+            $(item.row).addClass('displace-alert danger');
+          }
+        }
+
+        queueActiveItem = false;
+        competencyQueue();
+      },
+      fail: function (ex) {
+        $(item.row).addClass('displace-alert danger');
+        queueActiveItem = false;
+        Notification.exception(ex);
+      }
+    }]);
+  }
+
+  /**
+   * Get the currently visible framework
+   * @returns {jQuery}
+   */
+  function getCurrentFramework() {
+    return $competenciesSelectorContainer.find('.local_displace-framework-container > *:visible').first();
+  }
+
+  /**
+   * get containers for all root nodes
+   * @param {jQuery?} $container
+   * @returns {*}
+   */
+  function getRootContainers($container) {
+    if (!$container) {
+      $container = getCurrentFramework();
+    }
+
+    return $container.find('.competency-root-container').children('.competency-container');
+  }
+
+  /**
+   * get all children of a competency
+   * @param {jQuery} row the competency row
+   * @returns {jQuery}
+   */
+  function getChildren(row) {
+    return $(row).closest('.competency-container').children('.competency-children').children().children('.competency-row');
+  }
+
+  /**
+   * Load the selected framework
+   * @returns {Promise<void>}
+   */
+  async function loadSelectedFramework() {
+    var selectedText = $frameworkSelect.find("option:selected").text();
+
+    const s = await get_strings([
+      {key: 'competency:loading_framework', component: 'local_displace', param: selectedText}
+    ]);
+
+    // hide all other frameworks
+    $competenciesSelectorContainer.find('.local_displace-framework-container > *').hide();
+
+    var frameworkid = $frameworkSelect.val();
+    var $existingFramework = $competenciesSelectorContainer.find('.local_displace-framework-container > [data-frameworkid="' + frameworkid + '"]');
+
+    if ($existingFramework.length) {
+      $existingFramework.show();
+    } else {
+      // Loading info table
+      var $container = $('<div data-frameworkid="' + frameworkid + '">' + s[0] + '</div>')
+        .appendTo($competenciesSelectorContainer.find('.local_displace-framework-container'));
+
+      const ret = await getOnce(Config.wwwroot + '/local/displace/competency/coursecompetenciesadd.php?action=competency_selector_tree&courseid=' +
+        courseid + '&frameworkid=' + frameworkid);
+      $container.html('');
+      $container.append(ret);
+
+      sessionCompetencies.forEach((id) => {
+        $container.find('.competency-row[data-id=' + id + ']').addClass('used');
+      });
+
+      if (debug) {
+        console.log('root container', getRootContainers($container).length, getRootContainers($container));
+      }
+
+      openDefaultNodes();
+    }
+  }
+
+  /**
+   * Update the search results.
+   */
+  function updateSearch() {
+    const searchText = $searchInput.val().trim();
+
+    const $container = getCurrentFramework();
+
+    $competenciesSelectorContainer.find('.local_displace-table-search-not-entries-found-message').addClass('hidden');
+    $competenciesSelectorContainer.find('.local_displace-table-search-more-entries-found').addClass('hidden');
+
+    const $oldFoundRows = $container.find('.competency-row.is-found');
+    $oldFoundRows.removeClass('is-found');
+    $oldFoundRows.find('.shortname.highlighted').remove();
+
+    if (searchText.length == 0) {
+      // alle Elemente anzeigen
+      $container.find('.competency-container.hidden').removeClass('hidden');
+      // getRootContainers($container).removeClass('hidden');
+
+      if ($oldFoundRows.length) {
+        // leave tree as is
+      } else {
+        // last search was empty, so show default table
+
+        // first hide and close all
+        $container.find('.competency-row.open').removeClass('open');
+
+        openDefaultNodes();
+      }
+    } else {
+      // first hide and close all
+      $container.find('.competency-row.open').removeClass('open');
+      $container.find('.competency-container').addClass('hidden');
+
+      const searchParts = searchText.toLowerCase().split(/\s+/);
+
+      // show found items
+      var $foundRows = $container.find('.shortname')
+        .filter((index, el) => {
+          var text = el.textContent.toLowerCase();
+          return searchParts.every(part => text.includes(part));
+        })
+        .closest('.competency-row');
+
+      const maxFound = 300;
+      const moreFound = $foundRows.length > maxFound;
+      $foundRows = $foundRows.slice(0, maxFound);
+
+      if ($foundRows.length) {
+        // mark them found
+        $foundRows.addClass('is-found');
+        // then open it and all parents
+        $foundRows.parents('.competency-container').children('.competency-row.has-children').addClass('open');
+        // show container and all parent containers
+        $foundRows.parents('.competency-container').removeClass('hidden');
+        // if a parent is found, show all children
+        $foundRows.closest('.competency-container').find('.competency-container.hidden').removeClass('hidden');
+
+        // highlight text inside the row
+        const escapedStr = searchParts.map(part => escapeRegExp(escapeHTML(part))).join('|');
+        const regexp = new RegExp(`(${escapedStr})`, 'gi');
+        $foundRows.find('.shortname').each(function (index, el) {
+          // replace each part with a <mark/> tag
+          $('<span class="shortname highlighted">' + el.textContent.replace(regexp, '<mark>$1</mark>') + '</span>').insertBefore(el);
+        });
+
+        if (moreFound) {
+          $competenciesSelectorContainer.find('.local_displace-table-search-more-entries-found').removeClass('hidden')
+            .find('.num').html(maxFound);
+        }
+      } else {
+        $competenciesSelectorContainer.find('.local_displace-table-search-not-entries-found-message').removeClass('hidden');
+      }
+    }
+  }
+
+  /**
+   * Open all used competencies or at least first level
+   */
+  function openDefaultNodes() {
+    const $container = getCurrentFramework();
+
+    // open used competencies
+    $container.find('.competency-row.used').parents('.competency-container').children('.competency-row.has-children')
+      .addClass('open');
+
+    if (!document.location.href.match(/package_edit.php/) && $container.find('.open').length == 0) {
+      // erste ebene öffnen, aber nicht auf der package_edit.php, weil sonst wird die Liste zu lange
+      // und auch nicht, wenn schon Elemente ausgewählt sind
+      getRootContainers($container).each(function () {
+        toggleNode(this, true);
+      });
+    }
+  }
+
+  /**
+   * Recursively toggle nodes.
+   * @param {HTMLElement} el the node to toggle
+   * @param {boolean} open
+   */
+  function toggleNode(el, open = undefined) {
+    var $el = $(el);
+    if ($el.is('.competency-container')) {
+      $el = $el.children('.competency-row');
+    } else {
+      $el = $el.closest('.competency-row');
+    }
+    $el.toggleClass('open', open);
+  }
 }
 
 /**
  * Sets the rule outcome option.
- * @param {DOMElement} select
+ * @param {HTMLElement} select
  */
 export function setRuleOutcomeOption(select) {
   let pendingPromise = new Pending();
   let requests = [];
 
-  let coursecompetencyid = $(select).closest('tr').attr('data-id');
+  let coursecompetencyid = $(select).closest('.competency-row').attr('data-coursecompetencyid');
   let ruleoutcome = $(select).val();
   requests = Ajax.call([
     {
@@ -223,286 +559,50 @@ export function setRuleOutcomeOption(select) {
     .then(pendingPromise.resolve);
 }
 
-function getCurrentTable() {
-  return $('.coursecompetenciesadd_framework:visible').first();
-}
+/**
+ * Remove a single competency from a course and hide it from the list.
+ * @param {HTMLElement} el
+ * @returns {Promise<void>}
+ */
+export async function competencyRemoveFromList(el, confirmed = false) {
+  if (!confirmed) {
+    var shortname = $(el).closest('.competency-row').find('.shortname').html();
+    const s = await get_strings([
+      {'key': 'competency:remove:title', component: 'local_displace'},
+      {'key': 'competency:remove:single', component: 'local_displace', param: {shortname}},
+      {'key': 'yes'},
+      {'key': 'no'}
+    ]);
 
-function loadSelectedFramework() {
-  var $select = $('.coursecompetenciesadd select[name="frameworkid"]');
-  var selectedText = $select.find("option:selected").text();
-
-  var $existingFramework = $('.coursecompetenciesadd_framework[data-frameworkid=' + $select.val() + ']');
-
-  // hide all other frameworks
-  $('#local_displace-framework-container').children().hide();
-
-  if ($existingFramework.length) {
-    $existingFramework.show();
+    Notification.confirm(
+      s[0], s[1], s[2], s[3],
+      function () {
+        competencyRemoveFromList(el, true);
+      }
+    );
   } else {
-    // Loading info table
-    var $loadingInfoTable = $('<div class="coursecompetenciesadd_framework" data-frameworkid="' + $select.val() + '">Lade ' + selectedText + '...</div>');
-    $loadingInfoTable.appendTo('#local_displace-framework-container');
+    if (debug) {
+      console.log('Remove single', el);
+    }
+    let id = $(el).closest('.competency-row').attr('data-id');
+    let method = 'core_competency_remove_competency_from_course';
+    let data = {'courseid': Config.courseId, 'competencyid': id};
+    let $row = $(el).closest('.competency-row');
+    $row.addClass('queue-pending');
 
-    $.get(Config.wwwroot + '/local/displace/competency/coursecompetenciesadd.php?action=competency_selector_tree&courseid=' + courseid + '&frameworkid=' + $select.val()).then(ret => {
-      var $newTable = $(ret);
-
-      $loadingInfoTable.after($newTable);
-      $newTable.toggle($loadingInfoTable.is(':visible'));
-      $loadingInfoTable.remove();
-
-      initTable($newTable);
-    });
-  }
-  // document.location.href = document.location.href.replace(/\?.*/, '') + '?courseid=' + Config.courseId + '&frameworkid=' + this.value;
-}
-
-/**
- * Initially collapse all competency frameworks.
- * @param {string} uniqid of template.
- */
-export function competenciesaddInit() {
-  if (debug) {
-    console.log('competenciesaddInit');
-  }
-
-  $('.coursecompetenciesadd select[name="frameworkid"]').change(loadSelectedFramework)
-
-  if ($('#local_displace-framework-container').is(':visible')) {
-    // only load tree if container is visible
-    loadSelectedFramework();
-  }
-
-  $(document).on('input', ':input[name="competency-search"]', function () {
-    const searchText = this.value.trim();
-
-    var $table = getCurrentTable();
-    console.log('input');
-
-    $('#local_displace-table-search-not-entries-found-message').addClass('hidden');
-
-    if (!searchText) {
-      if ($table.find('tr[data-id]:visible').length == 0) {
-        // last search was empty, so show default table
-        // show first level
-        getCurrentTable().find('tr').filter(function () {
-          return getParentPath($(this).attr('data-fullpath')) == '/0';
-        })
-          .removeClass('hidden')
-          // also open first level
-          .each(function () {
-            toggleNode(this, true);
-          });
-      } else {
-        $table.find('tr[data-id]')
-          .removeClass('is-found');
-      }
-    } else {
-      // first hide and close all
-      $table.find('tr[data-id]')
-        .addClass('hidden')
-        .removeClass('is-found')
-        .removeClass('children-visible')
-        .find('.fa-folder').removeClass('fa-folder-open');
-
-      // show found items
-      $table.find('.shortname')
-        .filter((index, el) => el.textContent.toLowerCase().includes(searchText.toLowerCase()))
-        .closest('tr')
-        .addClass('is-found')
-        // then open it and all parents
-        .each((index, el) => {
-          var $tr = $(el);
-
-          do {
-            $tr.removeClass('hidden');
-            toggleNode($tr, true);
-          } while ($tr = getParent($tr));
+    Ajax.call([{
+      methodname: method,
+      args: data,
+      done: function (result) {
+        // competencies list, remove the row
+        $row.fadeOut(500, function () {
+          $(this).remove(); // Remove the <tr> from the DOM after fading out
         });
-
-      if ($table.find('tr[data-id]:visible').length == 0) {
-        $('#local_displace-table-search-not-entries-found-message').removeClass('hidden');
+      },
+      fail: function (ex) {
+        $row.addClass('displace-alert danger');
+        Notification.exception(ex);
       }
-    }
-  });
-}
-
-function getParentPath(path) {
-  if (path) {
-    return path.replace(/\/[0-9]+$/, '');
-  }
-}
-
-function initTable($table) {
-  if (sessionCompetencies.length) {
-    sessionCompetencies.forEach((id) => {
-      $table.find('tr[data-id=' + id + ']').addClass('used');
-    });
-  }
-
-  // styles for animation
-  // Idee: den content der TDs in ein DIV wrappen, welches mit der Höhe animiert wird
-  // weil animation der Höhe mit overflow auf TDs nicht funktioniert
-  // zusätzlich das padding entfernen und dieses auf den sliding-wrapper-inner übertragen
-  $table.find('tr td')
-    .each(function () {
-      if ($(this).children().length) {
-        $(this).children().wrapAll('<div class="sliding-wrapper-inner"></div>');
-      } else {
-        $(this).append('<div class="sliding-wrapper-inner"></div>');
-      }
-
-      var $wrapperInner = $(this).find('.sliding-wrapper-inner');
-      $wrapperInner.wrap('<div class="sliding-wrapper"></div>');
-
-      $wrapperInner.css('padding', $(this).css('padding'));
-      $wrapperInner.css('border-top', $(this).css('border-top'));
-    })
-    .css('padding', '0')
-    .css('border-top', 'none')
-
-  // show first level
-  $table.find('tr').filter(function () {
-    return getParentPath($(this).attr('data-fullpath')) == '/0';
-  })
-    .removeClass('hidden')
-    // also open first level
-    .each(function () {
-      toggleNode(this, true);
-    });
-
-  // open used competencies
-  $table.find('tr.used').each(function () {
-    toggleInitRecursive(this);
-  });
-
-  // handle toggle click
-  $table.find('tr.has-children .toggler').click(function () {
-    toggleNode(this, null, true);
-  })
-
-  // handle other events
-  $table.find('.addsingle').click(function () {
-    competencyAddSingle(this);
-  });
-
-  $table.find('.addmultiple').click(function () {
-    competencyAddMultiple(this);
-  });
-
-  $table.find('.removesingle').click(function () {
-    competencyRemoveSingle(this);
-  });
-}
-
-function getParent(tr) {
-  var $tr = $(tr);
-
-  let $parent = $(tr).closest('table').find('tr[data-fullpath="' + getParentPath($tr.attr('data-fullpath')) + '"]');
-  if ($parent.length > 0) {
-    return $parent;
-  }
-}
-
-function getChildren(tr) {
-  var $tr = $(tr);
-
-  const parentPath = $tr.attr('data-fullpath');
-
-  return $(tr).closest('table').find('tr[data-fullpath^="' + $tr.attr('data-fullpath') + '/"]')
-    .filter(function () {
-      return getParentPath($(this).attr('data-fullpath')) == parentPath;
-    });
-}
-
-/**
- * Toggle recursively nodes by their parents.
- * @param {DOMElement} tr to start with.
- */
-function toggleInitRecursive(tr) {
-  var $tr = $(tr);
-
-  do {
-    $tr.removeClass('hidden');
-    toggleNode($tr, true);
-  } while ($tr = getParent($tr));
-}
-
-/**
- * Recursively toggle nodes.
- * @param {DOMElement} sender
- */
-function toggleNode(sender, open = undefined, animate = false) {
-  let $tr = $(sender).closest('tr');
-  let $table = $tr.closest('table');
-
-  if (open === null || open === undefined) {
-    open = !$tr.hasClass('children-visible');
-  }
-  let close = !open;
-
-  // do open/close only if it isn't already opened/closed
-  close = close && $tr.hasClass('children-visible');
-  open = open && !$tr.hasClass('children-visible');
-
-  if (close) {
-    $tr
-      .removeClass('children-visible')
-      .find('.fa-folder').removeClass('fa-folder-open');
-
-    // Make all children hidden.
-    var $children = $table.find('tr[data-fullpath^="' + $tr.attr('data-fullpath') + '/"]').not('.hidden');
-    if (!animate) {
-      $children.addClass('hidden');
-    } else {
-      var $wrapper = $children.find('.sliding-wrapper')
-      const height = $wrapper.outerHeight(); // Get current height
-      $wrapper.css('max-height', height); // Set height for transition
-      setTimeout(() => {
-        $wrapper.css('max-height', 0); // Animate to height 0
-        setTimeout(() => {
-          $children.addClass('hidden');
-          $wrapper.css('max-height', '');
-        }, 500); // Remove element from layout
-      }, 10); // Timeout for
-    }
-  }
-
-  if (open) {
-    $tr
-      .addClass('children-visible')
-      .find('.fa-folder').addClass('fa-folder-open');
-
-    // Make direct children visible and children of the children if they are open too.
-    var $children = getChildren($tr);
-    var $all = getChildren($tr);
-
-    do {
-      $children = $children.filter('.children-visible');
-
-      // get all subchildren in an array
-      $children = $children.map(function () {
-        return $children = getChildren(this).toArray()
-      });
-
-      $all = $all.add($children);
-    } while ($children.length > 0)
-
-    $children = $all;
-
-    if (!animate) {
-      $children.removeClass('hidden');
-    } else {
-      var $wrapper = $children.find('.sliding-wrapper')
-      $children.removeClass('hidden');
-      const height = 100; // Get current height
-      // const height = $wrapper.outerHeight(); // Get current height
-      $wrapper.css('max-height', 10); // Set height for transition
-      setTimeout(() => {
-        $wrapper.css('max-height', height);
-        setTimeout(() => {
-          $wrapper.css('max-height', '');
-        }, 500); // Remove element from layout
-      }, 10); // Timeout for
-    }
+    }]);
   }
 }
