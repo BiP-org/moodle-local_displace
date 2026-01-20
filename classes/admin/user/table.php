@@ -81,13 +81,13 @@ class table extends table_sql {
         $this->no_filter('firstaccess');
         $this->no_filter('lastaccess');
 
-        $yesno = [ 'confirmed', 'deleted', 'emailstop', 'suspended' ];
+        $yesno = ['confirmed', 'deleted', 'emailstop', 'suspended'];
         foreach ($yesno as $field) {
             $this->set_column_options($field,
                 sql_column: $field,
                 select_options: [
-                    ['text' => get_string('yes'), 'value' => 1],
-                    ['text' => get_string('no'), 'value' => 0],
+                    1 => get_string('yes'),
+                    0 => get_string('no'),
                 ]
             );
         }
@@ -162,29 +162,29 @@ class table extends table_sql {
                 $buttons[] = $OUTPUT->render_from_template('local_displace/link', $params);
             }
             if ($row->suspended) {
-                $params = (object) [
+                $params = (object)[
                     'icon' => 'fa fa-eye-slash',
                     'label' => get_string('unsuspenduser', 'admin'),
-                    'url' => new \moodle_url('/admin/user.php', [ 'unsuspend' => $row->id, 'sesskey' => sesskey() ]),
+                    'url' => new \moodle_url('/admin/user.php', ['unsuspend' => $row->id, 'sesskey' => sesskey()]),
                 ];
                 $buttons[] = $OUTPUT->render_from_template('local_displace/link', $params);
             } else {
                 if ($row->id == $USER->id or is_siteadmin($row)) {
                     // no suspending of admins or self!
                 } else {
-                    $params = (object) [
+                    $params = (object)[
                         'icon' => 'fa fa-eye',
                         'label' => get_string('suspenduser', 'admin'),
-                        'url' => new \moodle_url('/admin/user.php', [ 'suspend' => $row->id, 'sesskey' => sesskey() ]),
+                        'url' => new \moodle_url('/admin/user.php', ['suspend' => $row->id, 'sesskey' => sesskey()]),
                     ];
                     $buttons[] = $OUTPUT->render_from_template('local_displace/link', $params);
                 }
             }
             if (\login_is_lockedout($row)) {
-                $params = (object) [
+                $params = (object)[
                     'icon' => 'fa fa-unlock',
                     'label' => get_string('unlockaccount', 'admin'),
-                    'url' => new \moodle_url('/admin/user.php', [ 'unlock' => $row->id, 'sesskey' => sesskey() ]),
+                    'url' => new \moodle_url('/admin/user.php', ['unlock' => $row->id, 'sesskey' => sesskey()]),
                 ];
                 $buttons[] = $OUTPUT->render_from_template('local_displace/link', $params);
             }
@@ -194,10 +194,10 @@ class table extends table_sql {
             if (\is_mnet_remote_user($row) or $row->id == $USER->id or is_siteadmin($row)) {
                 // no deleting of self, mnet accounts or admins allowed
             } else {
-                $params = (object) [
+                $params = (object)[
                     'icon' => 'fa fa-trash',
                     'label' => get_string('delete'),
-                    'url' => new \moodle_url('/admin/user.php', [ 'delete' => $row->id, 'sesskey' => sesskey() ]),
+                    'url' => new \moodle_url('/admin/user.php', ['delete' => $row->id, 'sesskey' => sesskey()]),
                 ];
                 $buttons[] = $OUTPUT->render_from_template('local_displace/link', $params);
             }
